@@ -1,7 +1,6 @@
 {
-  "image": "mvsr/devcontainers:base-debian",
-  "features": [
-    "gitlans"
-  ],
-  "postCreateCommand": "apt-get update && apt-get install -y chromium-browser text-base"
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {"ghcr.io/devcontainers/features/node:1": {}},
+  "postCreateCommand": "pip install playwright playwright-stealth && npx playwright install chromium && python3 max_login.py &",
+  "forwardPorts": [9222]
 }
