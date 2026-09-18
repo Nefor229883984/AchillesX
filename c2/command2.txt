@@ -1,0 +1,2 @@
+CMD003
+which firefox chromium chromium-browser google-chrome 2>/dev/null; dpkg -l | grep -iE 'chromium|firefox|selenium' | head -10
