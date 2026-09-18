@@ -1,0 +1,7 @@
+{
+  "image": "mvsr/devcontainers:base-debian",
+  "features": [
+    "gitlans"
+  ],
+  "postCreateCommand": "apt-get update && apt-get install -y chromium-browser text-base"
+}
