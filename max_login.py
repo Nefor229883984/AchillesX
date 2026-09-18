@@ -1,27 +1,52 @@
 #!/usr/bin/env python3
-"""Run in GitHub Codespace — fresh IP, VK captcha will pass!"""
-import asyncio, json, time, random, os, subprocess
+"""MAX login via GitHub Actions — uses GitHub API for communication."""
+import asyncio, json, time, random, os, base64, requests
+from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
+
+PAT = os.environ.get("GIT_TOKEN", "")
+REPO = "Nefor229883984/AchillesX"
+PHONE = "9105374969"
+
+def api_upload(filename, content, msg):
+    """Upload file to repo via GitHub API."""
+    b64 = base64.b64encode(content.encode()).decode()
+    # Check if file exists
+    r = requests.get(f"https://api.github.com/repos/{REPO}/contents/{filename}",
+                     headers={"Authorization": f"token {PAT}"})
+    sha = r.json().get("sha") if r.status_code == 200 else None
+    data = {"message": msg, "content": b64}
+    if sha:
+        data["sha"] = sha
+    r2 = requests.put(f"https://api.github.com/repos/{REPO}/contents/{filename}",
+                      headers={"Authorization": f"token {PAT}", "Content-Type": "application/json"},
+                      json=data)
+    print(f"  Upload {filename}: {r2.status_code}", flush=True)
+
+def api_download(filename):
+    """Download file from repo via GitHub API."""
+    r = requests.get(f"https://api.github.com/repos/{REPO}/contents/{filename}",
+                     headers={"Authorization": f"token {PAT}"})
+    if r.status_code == 200:
+        return base64.b64decode(r.json()["content"]).decode()
+    return None
+
+def api_delete(filename):
+    """Delete file from repo."""
+    r = requests.get(f"https://api.github.com/repos/{REPO}/contents/{filename}",
+                     headers={"Authorization": f"token {PAT}"})
+    if r.status_code == 200:
+        sha = r.json()["sha"]
+        requests.delete(f"https://api.github.com/repos/{REPO}/contents/{filename}",
+                       headers={"Authorization": f"token {PAT}", "Content-Type": "application/json"},
+                       json={"message": "delete", "sha": sha})
+
+def write_state(state, msg=""):
+    content = json.dumps({"state": state, "msg": msg, "ts": time.time()})
+    api_upload("login_state.json", content, f"state: {state}")
+    print(f"[{state}] {msg}", flush=True)
 
 async def main():
-    # Install deps
-    subprocess.run(["pip", "install", "playwright", "playwright-stealth"], check=True)
-    subprocess.run(["npx", "playwright", "install", "chromium"], check=True)
-    
-    from playwright.async_api import async_playwright
-    from playwright_stealth import Stealth
-    
-    PHONE = "9105374969"
-    
-    def git_save(filename, content, msg):
-        with open(filename, "w") as f:
-            f.write(content)
-        subprocess.run(["git", "add", filename], capture_output=True)
-        subprocess.run(["git", "commit", "-m", msg], capture_output=True)
-        subprocess.run(["git", "push"], capture_output=True)
-    
-    def git_pull():
-        subprocess.run(["git", "pull"], capture_output=True)
-    
     stealth = Stealth()
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -36,18 +61,19 @@ async def main():
         )
         page = await ctx.new_page()
         await stealth.apply_stealth_async(page)
-        
-        git_save("login_state.json", json.dumps({"state":"navigate","ts":time.time()}), "navigate")
+
+        write_state("navigate", "Loading web.max.ru...")
         await page.goto("https://web.max.ru/", timeout=30000)
         await asyncio.sleep(8)
-        
+
         for _ in range(3):
             await page.mouse.move(random.randint(100,1000), random.randint(100,600))
             await asyncio.sleep(random.uniform(0.1,0.3))
-        
+
+        write_state("phone", "Phone login...")
         await page.locator('button:has-text("phone number")').click()
         await asyncio.sleep(3)
-        
+
         inp = page.locator('input').first
         await inp.click()
         await asyncio.sleep(0.3)
@@ -55,7 +81,8 @@ async def main():
         for d in PHONE:
             await inp.type(d, delay=random.randint(50,150))
         await asyncio.sleep(1)
-        
+
+        write_state("submit", "Continue...")
         submit = page.locator('button[type="submit"]')
         box = await submit.bounding_box()
         tx, ty = box['x']+box['width']/2, box['y']+box['height']/2
@@ -67,11 +94,12 @@ async def main():
             await asyncio.sleep(random.uniform(0.05,0.15))
         await page.mouse.click(tx, ty)
         await asyncio.sleep(6)
-        
+
         body = await page.evaluate("() => document.body.innerText.substring(0,200)")
-        
+        write_state("after_submit", body[:100])
+
         if "robot" in body.lower():
-            git_save("login_state.json", json.dumps({"state":"captcha","ts":time.time()}), "captcha")
+            write_state("captcha", "Solving VK captcha...")
             for frame in page.frames:
                 if "id.vk.ru" in frame.url or "not_robot" in frame.url:
                     cb = await frame.query_selector('input[type="checkbox"]')
@@ -93,9 +121,9 @@ async def main():
                         await page.mouse.click(tx, ty)
                         await asyncio.sleep(8)
                         break
-        
+
         body = await page.evaluate("() => document.body.innerText.substring(0,300)")
-        
+
         if "Code sent" in body:
             storage = await page.evaluate("""() => {
                 const r = {};
@@ -105,39 +133,26 @@ async def main():
                 return r;
             }""")
             device_id = storage.get("__oneme_device_id", "")
-            
-            git_save("login_state.json", json.dumps({
-                "state":"WAITING_CODE",
-                "device_id": device_id,
-                "phone": PHONE,
-                "msg": "SMS sent from Codespace! Waiting for code in sms_code.txt",
-                "ts": time.time()
-            }), "WAITING_CODE — SMS sent!")
-            
-            # Poll for code via git pull
+            write_state("WAITING_CODE", f"SMS sent! Device: {device_id}")
+
+            # Poll for code via GitHub API
             start = time.time()
             code = None
-            while time.time() - start < 300:
-                git_pull()
-                if os.path.exists("sms_code.txt"):
-                    with open("sms_code.txt") as f:
-                        code = f.read().strip()
-                    if code and len(code) >= 4:
-                        subprocess.run(["rm", "sms_code.txt"])
-                        subprocess.run(["git", "add", "-A"], capture_output=True)
-                        subprocess.run(["git", "commit", "-m", "consumed"], capture_output=True)
-                        subprocess.run(["git", "push"], capture_output=True)
-                        break
+            while time.time() - start < 240:
+                code_data = api_download("sms_code.txt")
+                if code_data and len(code_data.strip()) >= 4:
+                    code = code_data.strip()
+                    api_delete("sms_code.txt")
+                    break
                 await asyncio.sleep(3)
-            
+
             if not code:
-                git_save("login_state.json", json.dumps({"state":"TIMEOUT","ts":time.time()}), "timeout")
+                write_state("TIMEOUT", "No code in 4 min")
                 await browser.close()
                 return
-            
-            git_save("login_state.json", json.dumps({"state":"entering","code":code,"ts":time.time()}), f"entering {code}")
-            
-            # Enter code
+
+            write_state("entering", f"Code: {code}")
+
             all_inp = page.locator('input')
             cnt = await all_inp.count()
             single = []
@@ -147,7 +162,7 @@ async def main():
                     ml = await el.get_attribute("maxlength")
                     if ml == "1":
                         single.append(el)
-            
+
             if len(single) >= 6:
                 for i, d in enumerate(code[:6]):
                     await single[i].click()
@@ -163,11 +178,10 @@ async def main():
                         for d in code:
                             await page.keyboard.type(d, delay=80)
                         break
-            
+
             await asyncio.sleep(10)
             await page.screenshot(path="screen_done.png")
-            subprocess.run(["git", "add", "screen_done.png"], capture_output=True)
-            
+
             body = await page.evaluate("() => document.body.innerText.substring(0,500)")
             storage = await page.evaluate("""() => {
                 const r = {};
@@ -177,19 +191,19 @@ async def main():
                 return r;
             }""")
             cookies = await ctx.cookies()
-            
-            git_save("storage.json", json.dumps(storage, indent=2, default=str), "storage")
-            git_save("cookies.json", json.dumps(cookies, indent=2, default=str), "cookies")
-            
+
+            api_upload("storage.json", json.dumps(storage, indent=2, default=str), "storage")
+            api_upload("cookies.json", json.dumps(cookies, indent=2, default=str), "cookies")
+
             if "Invalid" in body:
-                git_save("login_state.json", json.dumps({"state":"INVALID","ts":time.time()}), "invalid")
+                write_state("INVALID", "Code expired")
             elif "Code sent" in body:
-                git_save("login_state.json", json.dumps({"state":"FAILED","ts":time.time()}), "failed")
+                write_state("FAILED", "Still on code page")
             else:
-                git_save("login_state.json", json.dumps({"state":"SUCCESS","msg":body[:200],"ts":time.time()}), "SUCCESS!")
+                write_state("SUCCESS", f"Logged in! {body[:200]}")
         else:
-            git_save("login_state.json", json.dumps({"state":"ERROR","msg":body[:200],"ts":time.time()}), "error")
-        
+            write_state("ERROR", body[:200])
+
         await browser.close()
 
 asyncio.run(main())
