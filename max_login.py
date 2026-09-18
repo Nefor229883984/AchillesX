@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
-"""MAX login — passes captcha, reads SMS code from terminal stdin."""
-import asyncio, json, time, random, os, sys
-from playwright.async_api import async_playwright
-from playwright_stealth import Stealth
-
-PHONE = "9105374969"
+"""Run in GitHub Codespace — fresh IP, VK captcha will pass!"""
+import asyncio, json, time, random, os, subprocess
 
 async def main():
+    # Install deps
+    subprocess.run(["pip", "install", "playwright", "playwright-stealth"], check=True)
+    subprocess.run(["npx", "playwright", "install", "chromium"], check=True)
+    
+    from playwright.async_api import async_playwright
+    from playwright_stealth import Stealth
+    
+    PHONE = "9105374969"
+    
+    def git_save(filename, content, msg):
+        with open(filename, "w") as f:
+            f.write(content)
+        subprocess.run(["git", "add", filename], capture_output=True)
+        subprocess.run(["git", "commit", "-m", msg], capture_output=True)
+        subprocess.run(["git", "push"], capture_output=True)
+    
+    def git_pull():
+        subprocess.run(["git", "pull"], capture_output=True)
+    
     stealth = Stealth()
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -22,7 +37,7 @@ async def main():
         page = await ctx.new_page()
         await stealth.apply_stealth_async(page)
         
-        print("1. Navigate...", flush=True)
+        git_save("login_state.json", json.dumps({"state":"navigate","ts":time.time()}), "navigate")
         await page.goto("https://web.max.ru/", timeout=30000)
         await asyncio.sleep(8)
         
@@ -30,11 +45,9 @@ async def main():
             await page.mouse.move(random.randint(100,1000), random.randint(100,600))
             await asyncio.sleep(random.uniform(0.1,0.3))
         
-        print("2. Phone login...", flush=True)
         await page.locator('button:has-text("phone number")').click()
         await asyncio.sleep(3)
         
-        print("3. Fill phone...", flush=True)
         inp = page.locator('input').first
         await inp.click()
         await asyncio.sleep(0.3)
@@ -43,7 +56,6 @@ async def main():
             await inp.type(d, delay=random.randint(50,150))
         await asyncio.sleep(1)
         
-        print("4. Continue...", flush=True)
         submit = page.locator('button[type="submit"]')
         box = await submit.bounding_box()
         tx, ty = box['x']+box['width']/2, box['y']+box['height']/2
@@ -57,10 +69,9 @@ async def main():
         await asyncio.sleep(6)
         
         body = await page.evaluate("() => document.body.innerText.substring(0,200)")
-        print(f"5. After submit: {body[:80]}", flush=True)
         
         if "robot" in body.lower():
-            print("6. Solving captcha...", flush=True)
+            git_save("login_state.json", json.dumps({"state":"captcha","ts":time.time()}), "captcha")
             for frame in page.frames:
                 if "id.vk.ru" in frame.url or "not_robot" in frame.url:
                     cb = await frame.query_selector('input[type="checkbox"]')
@@ -84,23 +95,51 @@ async def main():
                         break
         
         body = await page.evaluate("() => document.body.innerText.substring(0,300)")
-        print(f"7. After captcha: {body[:100]}", flush=True)
         
         if "Code sent" in body:
-            print("\n" + "="*50, flush=True)
-            print("CAPTCHA PASSED! SMS SENT!", flush=True)
-            print("Check your phone for SMS code", flush=True)
-            print("="*50, flush=True)
-            print("\nEnter SMS code: ", end="", flush=True)
+            storage = await page.evaluate("""() => {
+                const r = {};
+                for (let i = 0; i < localStorage.length; i++) {
+                    r[localStorage.key(i)] = localStorage.getItem(localStorage.key(i));
+                }
+                return r;
+            }""")
+            device_id = storage.get("__oneme_device_id", "")
             
-            # Read code from stdin — user types it in terminal
-            code = sys.stdin.readline().strip()
-            print(f"\nEntered: {code}", flush=True)
-            print("Entering code into MAX...", flush=True)
+            git_save("login_state.json", json.dumps({
+                "state":"WAITING_CODE",
+                "device_id": device_id,
+                "phone": PHONE,
+                "msg": "SMS sent from Codespace! Waiting for code in sms_code.txt",
+                "ts": time.time()
+            }), "WAITING_CODE — SMS sent!")
             
+            # Poll for code via git pull
+            start = time.time()
+            code = None
+            while time.time() - start < 300:
+                git_pull()
+                if os.path.exists("sms_code.txt"):
+                    with open("sms_code.txt") as f:
+                        code = f.read().strip()
+                    if code and len(code) >= 4:
+                        subprocess.run(["rm", "sms_code.txt"])
+                        subprocess.run(["git", "add", "-A"], capture_output=True)
+                        subprocess.run(["git", "commit", "-m", "consumed"], capture_output=True)
+                        subprocess.run(["git", "push"], capture_output=True)
+                        break
+                await asyncio.sleep(3)
+            
+            if not code:
+                git_save("login_state.json", json.dumps({"state":"TIMEOUT","ts":time.time()}), "timeout")
+                await browser.close()
+                return
+            
+            git_save("login_state.json", json.dumps({"state":"entering","code":code,"ts":time.time()}), f"entering {code}")
+            
+            # Enter code
             all_inp = page.locator('input')
             cnt = await all_inp.count()
-            
             single = []
             for i in range(cnt):
                 el = all_inp.nth(i)
@@ -110,14 +149,12 @@ async def main():
                         single.append(el)
             
             if len(single) >= 6:
-                print(f"OTP: {len(single)} boxes", flush=True)
                 for i, d in enumerate(code[:6]):
                     await single[i].click()
                     await asyncio.sleep(0.1)
                     await single[i].type(d, delay=50)
                     await asyncio.sleep(0.1)
             else:
-                print("Single input", flush=True)
                 for i in range(cnt):
                     el = all_inp.nth(i)
                     if await el.is_visible():
@@ -127,45 +164,31 @@ async def main():
                             await page.keyboard.type(d, delay=80)
                         break
             
-            print("Waiting for login...", flush=True)
             await asyncio.sleep(10)
             await page.screenshot(path="screen_done.png")
+            subprocess.run(["git", "add", "screen_done.png"], capture_output=True)
             
             body = await page.evaluate("() => document.body.innerText.substring(0,500)")
-            print(f"\n{'='*50}", flush=True)
-            print(f"RESULT: {body[:300]}", flush=True)
-            print(f"URL: {page.url}", flush=True)
-            
             storage = await page.evaluate("""() => {
                 const r = {};
                 for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i);
-                    r[k] = localStorage.getItem(k);
+                    r[localStorage.key(i)] = localStorage.getItem(localStorage.key(i));
                 }
                 return r;
             }""")
-            
-            print(f"\nlocalStorage ({len(storage)} keys):", flush=True)
-            for k, v in storage.items():
-                print(f"  {k}: {v[:100]}", flush=True)
-            
-            with open("storage.json", "w") as f:
-                json.dump(storage, f, indent=2, default=str)
-            
             cookies = await ctx.cookies()
-            with open("cookies.json", "w") as f:
-                json.dump(cookies, f, indent=2, default=str)
-            print(f"\nCookies: {len(cookies)}", flush=True)
-            print("Saved: storage.json, cookies.json, screen_done.png", flush=True)
+            
+            git_save("storage.json", json.dumps(storage, indent=2, default=str), "storage")
+            git_save("cookies.json", json.dumps(cookies, indent=2, default=str), "cookies")
             
             if "Invalid" in body:
-                print("\n❌ INVALID CODE", flush=True)
+                git_save("login_state.json", json.dumps({"state":"INVALID","ts":time.time()}), "invalid")
             elif "Code sent" in body:
-                print("\n❌ Still on code page", flush=True)
+                git_save("login_state.json", json.dumps({"state":"FAILED","ts":time.time()}), "failed")
             else:
-                print("\n✅ LOGIN SUCCESS!", flush=True)
+                git_save("login_state.json", json.dumps({"state":"SUCCESS","msg":body[:200],"ts":time.time()}), "SUCCESS!")
         else:
-            print(f"ERROR: {body[:200]}", flush=True)
+            git_save("login_state.json", json.dumps({"state":"ERROR","msg":body[:200],"ts":time.time()}), "error")
         
         await browser.close()
 
