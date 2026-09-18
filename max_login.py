@@ -4,18 +4,28 @@ from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
 PHONE = "9105374969"
-CODE_FILE = "/workspace/sms_code.txt"
-STATE_FILE = "/workspace/login_state.json"
-TOKEN_FILE = "/workspace/token.txt"
+REPO = "Nefor229883984/AchillesX"
+
+def git_commit(filename, content, msg):
+    """Write file, commit, push to repo."""
+    with open(filename, "w") as f:
+        f.write(content)
+    subprocess.run(["git", "add", filename], check=True)
+    subprocess.run(["git", "commit", "-m", msg], check=True, capture_output=True)
+    subprocess.run(["git", "push"], check=True, capture_output=True)
+
+def git_pull():
+    """Pull latest changes."""
+    subprocess.run(["git", "pull"], check=True, capture_output=True)
 
 def write_state(s, m=""):
-    with open(STATE_FILE, "w") as f:
-        json.dump({"state": s, "msg": m, "ts": time.time()}, f)
-    print(f"[{s}] {m}", flush=True)
+    state = {"state": s, "msg": m, "ts": time.time()}
+    git_commit("login_state.json", json.dumps(state), f"state: {s}")
 
 async def main():
-    # Install Chrome first
-    subprocess.run(["npx", "playwright", "install", "chromium"], check=True)
+    # Install Chrome
+    subprocess.run(["npx", "playwright", "install", "chromium"], check=True, capture_output=True)
+    subprocess.run(["pip", "install", "playwright-stealth"], check=True, capture_output=True)
     
     stealth = Stealth()
     async with async_playwright() as p:
@@ -92,18 +102,26 @@ async def main():
                         break
         
         body = await page.evaluate("() => document.body.innerText.substring(0,300)")
-        write_state("WAITING_CODE", "CAPTCHA PASSED! SMS sent. Tell me the code!")
+        write_state("WAITING_CODE", "CAPTCHA PASSED! SMS sent. Waiting for code in sms_code.txt")
         
+        # Poll for code via git pull
         start = time.time()
         code = None
         while time.time() - start < 600:
-            if os.path.exists(CODE_FILE):
-                with open(CODE_FILE) as f:
+            try:
+                git_pull()
+            except:
+                pass
+            if os.path.exists("sms_code.txt"):
+                with open("sms_code.txt") as f:
                     code = f.read().strip()
                 if code and len(code) >= 4:
-                    os.remove(CODE_FILE)
+                    os.remove("sms_code.txt")
+                    subprocess.run(["git", "add", "sms_code.txt"], capture_output=True)
+                    subprocess.run(["git", "commit", "-m", "consumed code"], capture_output=True)
+                    subprocess.run(["git", "push"], capture_output=True)
                     break
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
         
         if not code:
             write_state("TIMEOUT", "No code in 10 min")
@@ -140,10 +158,12 @@ async def main():
                     break
         
         await asyncio.sleep(10)
-        await page.screenshot(path="/workspace/screen_done.png")
+        await page.screenshot(path="screen_done.png")
+        subprocess.run(["git", "add", "screen_done.png"], capture_output=True)
+        subprocess.run(["git", "commit", "-m", "screenshot"], capture_output=True)
+        subprocess.run(["git", "push"], capture_output=True)
         
         body = await page.evaluate("() => document.body.innerText.substring(0,500)")
-        write_state("result", f"Body: {body[:200]}")
         
         storage = await page.evaluate("""() => {
             const r = {};
@@ -154,14 +174,18 @@ async def main():
             return r;
         }""")
         
-        with open("/workspace/storage.json", "w") as f:
-            json.dump(storage, f, indent=2, default=str)
+        git_commit("storage.json", json.dumps(storage, indent=2, default=str), "storage dump")
         
         cookies = await ctx.cookies()
-        with open("/workspace/cookies.json", "w") as f:
-            json.dump(cookies, f, indent=2, default=str)
+        git_commit("cookies.json", json.dumps(cookies, indent=2, default=str), "cookies dump")
         
-        write_state("DONE", f"Storage: {len(storage)} keys, Cookies: {len(cookies)}")
+        if "Invalid" in body:
+            write_state("INVALID", "Code was invalid/expired")
+        elif "Code sent" in body:
+            write_state("STILL_CODE_PAGE", "Still on code page")
+        else:
+            write_state("LOGIN_SUCCESS", f"Storage: {len(storage)} keys, Cookies: {len(cookies)}")
+        
         await browser.close()
 
 asyncio.run(main())
